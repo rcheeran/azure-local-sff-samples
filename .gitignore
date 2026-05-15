@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs / runtime
+*.log
+log.txt
+*.pid
+
+# Models / large binaries (committed only when intentional)
+# *.task
+# *.onnx
+# *.bin
+
+# Secrets / local config
+*.env
+.env.*
+!.env.example
+kubeconfig
+*.pem
+*.key

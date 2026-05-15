@@ -1,0 +1,39 @@
+apiVersion: foundrylocal.azure.com/v1
+kind: ModelDeployment
+metadata:
+  name: qwen2-5-0-5b
+  namespace: foundry-local-operator
+  labels:
+    app.kubernetes.io/name: qwen2-5-0-5b
+    app.kubernetes.io/component: inference
+    foundry.azure.com/hardware: cpu
+spec:
+  displayName: "Qwen2.5 0.5B CPU"
+  model:
+    catalog:
+      name: qwen2.5-0.5b-instruct-generic-cpu
+      version: "4"
+  workloadType: generative
+  compute: cpu
+  replicas: 1
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  # This section is relevant in case you use an Ingress Controller
+  endpoint:
+    enabled: true
+    host: qwen-cpu.local
+    ingressClassName: nginx
+    # The operator hard-codes nginx.ingress.kubernetes.io/rewrite-target on
+    # the generated Ingress. We must therefore use a regex path with a
+    # capture group AND tell the operator the matching rewrite target,
+    # otherwise nginx silently rewrites every URL to / and the upstream
+    # OpenAI server returns 404 on /v1/models, /v1/chat/completions, etc.
+    # See `kubectl explain modeldeployment.spec.endpoint`.
+    path: /(.*)
+    pathType: ImplementationSpecific
+    rewritePath: /$1

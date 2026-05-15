@@ -1,0 +1,68 @@
+# --------------------------------------------------------------------------- #
+# Restores the bootstrap selfsigned Issuer + root CA Certificate that the     #
+# Helm release `inference-operator` expects in the `cert-manager` namespace.  #
+#                                                                              #
+# Why: both objects were deleted from the cluster (helm `get manifest` still  #
+# lists them, but they are gone), so the secret                               #
+# `foundry-local-operator-root-ca-key-pair` no longer exists, which makes the  #
+# ClusterIssuer `foundry-local-operator-ca-issuer` Ready=False and prevents   #
+# any new Certificate (e.g., for Whisper) from being issued against it.       #
+#                                                                              #
+# These manifests are the verbatim originals from the                          #
+# inference-operator-0.0.1-prp.3 chart. Re-applying them recreates the keypair #
+# secret and turns the ClusterIssuer back to Ready=True. Existing Certificates #
+# (Qwen, inference-operator-tls-cert) keep working because they only need the #
+# secret to exist for renewal.                                                 #
+#                                                                              #
+# Apply:                                                                       #
+#   kubectl apply -f bootstrap_foundry_ca.yaml                                #
+#                                                                              #
+# Verify:                                                                      #
+#   kubectl get clusterissuer foundry-local-operator-ca-issuer                #
+#   # READY should flip to True within ~10s                                    #
+# --------------------------------------------------------------------------- #
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: foundry-local-operator-selfsigned-bootstrap
+  namespace: cert-manager
+  labels:
+    helm.sh/chart: inference-operator-0.0.1-prp.3
+    app.kubernetes.io/name: inference-operator
+    app.kubernetes.io/instance: inference-operator
+    app.kubernetes.io/version: "0.0.1-prp.3"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: tls
+    foundry.azure.com/release-namespace: foundry-local-operator
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: foundry-local-operator-root-ca
+  namespace: cert-manager
+  labels:
+    helm.sh/chart: inference-operator-0.0.1-prp.3
+    app.kubernetes.io/name: inference-operator
+    app.kubernetes.io/instance: inference-operator
+    app.kubernetes.io/version: "0.0.1-prp.3"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: tls
+    foundry.azure.com/release-namespace: foundry-local-operator
+spec:
+  isCA: true
+  commonName: "foundry-local-operator Root CA"
+  secretName: foundry-local-operator-root-ca-key-pair
+  duration: 87600h          # 10 years
+  renewBefore: 720h         # 30 days
+  subject:
+    organizations:
+      - "Foundry Local"
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    name: foundry-local-operator-selfsigned-bootstrap
+    kind: Issuer
+    group: cert-manager.io

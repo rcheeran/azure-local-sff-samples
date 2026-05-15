@@ -1,0 +1,51 @@
+# =========================================================================== #
+# TLS certificate for the Parakeet ASR Ingress.                                #
+#                                                                              #
+# Issued by `foundry-local-operator-ca-issuer` (a ClusterIssuer maintained by  #
+# bootstrap_foundry_ca.yaml). The resulting Secret `parakeet-gpu-local-tls` is #
+# referenced by the Ingress in parakeet_gpu.yaml.                              #
+#                                                                              #
+# Apply order (cert-manager will populate the Secret automatically once the    #
+# ClusterIssuer is Ready):                                                     #
+#                                                                              #
+#   kubectl apply -f parakeet_gpu.yaml         # creates ns + Ingress + ...    #
+#   kubectl apply -f parakeet_gpu_cert.yaml    # provisions the cert           #
+#                                                                              #
+# Verify:                                                                      #
+#   kubectl -n parakeet get certificate parakeet-gpu-local-cert                #
+#   kubectl -n parakeet describe certificate parakeet-gpu-local-cert           #
+#                                                                              #
+# Trust on a client (the issuer is private):                                   #
+#   - For ad-hoc curl tests pass `-k` to skip verification.                    #
+#   - For real trust, fetch the CA bundle from the foundry-local-operator     #
+#     ConfigMap (see Docs/Nginx_setup.md or trust-manager Bundle resources).   #
+# =========================================================================== #
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: parakeet-gpu-local-cert
+  namespace: parakeet
+  labels:
+    app.kubernetes.io/name: parakeet-gpu
+spec:
+  secretName: parakeet-gpu-local-tls
+  duration: 8760h        # 1 year
+  renewBefore: 720h      # renew 30 days before expiry
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  commonName: parakeet-gpu.local
+  dnsNames:
+    - parakeet-gpu.local
+    - parakeet-gpu.parakeet.svc.cluster.local
+    - parakeet-gpu.parakeet.svc
+    - parakeet-gpu
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: foundry-local-operator-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

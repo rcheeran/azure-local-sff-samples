@@ -1,0 +1,89 @@
+# =========================================================================== #
+# robot-metrics                                                                #
+#                                                                              #
+# Long-running publisher that emits dummy robot health/coords/busy telemetry   #
+# to the AIO MQTT broker (`aio-lb-broker` in the `azure-iot-operations`        #
+# namespace) at LOOP_PERIOD_S intervals.                                       #
+#                                                                              #
+# Pre-reqs (one time):                                                         #
+#   1) Build the image:                                                        #
+#         cd /home/clouduser/demo/cobotpoc/container-images/robot-metrics      #
+#         sudo docker build --network=host -t robot-metrics:local .            #
+#                                                                              #
+#   2) Import into k3s containerd:                                             #
+#         sudo docker save robot-metrics:local \                               #
+#             | sudo /usr/local/bin/k3s ctr -n k8s.io images import -          #
+#                                                                              #
+# Apply:                                                                       #
+#   kubectl apply -f kubernetes_yamls/robot_metrics_yamls/robot_metrics_deployment.yaml
+#                                                                              #
+# Watch / inspect:                                                             #
+#   kubectl -n robot-metrics get deploy,pods                                   #
+#   kubectl -n robot-metrics logs -l app.kubernetes.io/name=robot-metrics -f   #
+#                                                                              #
+# Subscribe to confirm messages are landing on the broker (from this host):    #
+#   mosquitto_sub -h 192.168.1.197 -p 11000 -t 'robot/#' -v                    #
+# =========================================================================== #
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: robot-metrics
+  labels:
+    app.kubernetes.io/name: robot-metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robot-metrics
+  namespace: robot-metrics
+  labels:
+    app.kubernetes.io/name: robot-metrics
+    app.kubernetes.io/component: telemetry-publisher
+spec:
+  # Outbound-only MQTT publisher; one replica is plenty.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: robot-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: robot-metrics
+        app.kubernetes.io/component: telemetry-publisher
+    spec:
+      containers:
+        - name: robot-metrics
+          image: robot-metrics:local
+          imagePullPolicy: Never        # built locally, imported via `k3s ctr images import`
+          env:
+            # Use the in-cluster ClusterIP service so traffic stays inside
+            # the cluster (no LoadBalancer hairpin). Override at apply time
+            # if you ever want to point at a different broker.
+            - { name: MQTT_BROKER,    value: "aio-lb-broker.azure-iot-operations.svc.cluster.local" }
+            - { name: MQTT_PORT,      value: "11000" }
+            - { name: MQTT_HEALTH,    value: "robot/health" }
+            - { name: MQTT_COORDS,    value: "robot/coords" }
+            - { name: MQTT_ROBOTBUSY, value: "robot/robot_busy" }
+            - { name: MQTT_QOS,       value: "0" }
+            - { name: LEADER_ID,      value: "robot-metrics" }
+            # 5-minute publish cadence per topic.
+            - { name: LOOP_PERIOD_S,  value: "300.0" }
+            - { name: LOOP_HZ,        value: "5.0" }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

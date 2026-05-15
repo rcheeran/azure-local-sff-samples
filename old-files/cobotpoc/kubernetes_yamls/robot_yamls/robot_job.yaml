@@ -1,0 +1,109 @@
+# =========================================================================== #
+# test_robot.py as a Kubernetes Job                                            #
+#                                                                              #
+# `test_robot.py` runs a fixed motion sequence and exits, so this is a Job,    #
+# NOT a Deployment. Re-run by deleting and re-applying the Job, or use         #
+# `kubectl create job ... --from=job/test-robot`.                              #
+#                                                                              #
+# Pre-reqs (one time):                                                         #
+#   1) Build the image:                                                        #
+#         cd /home/clouduser/demo/cobotpoc/container-images/robot              #
+#         sudo docker build --network=host -t test-robot:local .               #
+#                                                                              #
+#   2) Import into k3s containerd (k3s does NOT see docker images by default): #
+#         sudo docker save test-robot:local \                                  #
+#             | sudo /usr/local/bin/k3s ctr -n k8s.io images import -          #
+#                                                                              #
+#   3) Verify the robot is on /dev/ttyACM0:                                    #
+#         ls -l /dev/ttyACM0                                                   #
+#                                                                              #
+# Apply:                                                                       #
+#   kubectl apply -f robot_job.yaml                                            #
+#                                                                              #
+# Watch / inspect:                                                             #
+#   kubectl -n robot get jobs,pods                                             #
+#   kubectl -n robot logs -l job-name=test-robot -f                            #
+#                                                                              #
+# Re-run after a successful (or failed) Job:                                   #
+#   kubectl delete -f robot_job.yaml                                           #
+#   kubectl apply -f robot_job.yaml                                            #
+#                                                                              #
+# IMPORTANT - SAFETY NOTE:                                                     #
+# `restartPolicy: Never` and `backoffLimit: 0` ensure the script runs AT MOST  #
+# ONCE per Job. Auto-retry on a robot motion script is unsafe (could complete  #
+# the second half of an interrupted move). If the script crashes, you redeploy #
+# manually after checking the robot's physical state.                          #
+# =========================================================================== #
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: robot
+  labels:
+    app.kubernetes.io/name: robot
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-robot
+  namespace: robot
+  labels:
+    app.kubernetes.io/name: test-robot
+    app.kubernetes.io/component: motion-test
+spec:
+  # Don't retry on failure - safer for motion code.
+  backoffLimit: 0
+  # Auto-clean the Job (and its pod) 10 minutes after it finishes so re-applying
+  # the same manifest doesn't conflict with a stale completed Job. Set to a
+  # higher value if you want to grep logs after the run; or remove the field
+  # entirely to keep the Job indefinitely.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: test-robot
+    spec:
+      restartPolicy: Never
+      # Stick to the node that physically owns the USB port. There's only one
+      # node in this k3s cluster today, but if you ever scale out, this prevents
+      # the pod from getting scheduled where the robot isn't plugged in.
+      nodeSelector:
+        kubernetes.io/hostname: 651441a2-1e90-4e87-afd0-6c54402789df
+      containers:
+        - name: test-robot
+          image: test-robot:local
+          imagePullPolicy: Never        # built locally, imported via `k3s ctr images import`
+          securityContext:
+            # Why `privileged: true`:
+            # `hostPath` mounts only make the device *node* visible inside the
+            # container; Kubernetes does NOT add it to the pod's device-cgroup
+            # whitelist. Without that whitelist entry, `open("/dev/ttyACM0")`
+            # fails with EPERM ("Operation not permitted") even as root, even
+            # with the right Linux mode bits. The simplest, most reliable way
+            # to allow the open() in core Kubernetes is `privileged: true`.
+            #
+            # Trade-off: this grants all capabilities and disables seccomp.
+            # Acceptable here because:
+            #   1) It's a single-tenant k3s on a private node.
+            #   2) The image only contains a tiny motion script, no shell loop.
+            #   3) The job auto-deletes 10 minutes after exit (ttlSecondsAfterFinished).
+            # If you ever multi-tenant this cluster, swap to a Generic Device
+            # Plugin (e.g. squat/generic-device-plugin) and request the device
+            # via resources instead.
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: robot-tty
+              mountPath: /dev/ttyACM0
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: robot-tty
+          hostPath:
+            path: /dev/ttyACM0
+            type: CharDevice           # fail fast if /dev/ttyACM0 isn't actually a char device

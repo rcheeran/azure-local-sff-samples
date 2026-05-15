@@ -1,0 +1,17 @@
+services:
+  mic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mic-access
+    command: ["python3", "access_mic.py"]
+    network_mode: host
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/tmp/hf-cache
+    tty: true
+    stdin_open: true

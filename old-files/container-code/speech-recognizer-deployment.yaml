@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: speech-recognizer
+  labels:
+    app: speech-recognizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: speech-recognizer
+  template:
+    metadata:
+      labels:
+        app: speech-recognizer
+    spec:
+      containers:
+        - name: speech-recognizer
+          image: localhost:5000/speech-recognizer:v1
+          imagePullPolicy: Never
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          # Optional: Mount audio device for microphone access
+          # Uncomment below if running on single-node cluster with audio device
+          # volumeMounts:
+          #   - name: audio-device
+          #     mountPath: /dev/snd
+          # securityContext:
+          #   privileged: true
+      # volumes:
+      #   - name: audio-device
+      #     hostPath:
+      #       path: /dev/snd
+      #       type: Directory

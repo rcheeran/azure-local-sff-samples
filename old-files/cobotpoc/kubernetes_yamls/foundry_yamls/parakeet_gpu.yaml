@@ -1,0 +1,231 @@
+# =========================================================================== #
+# Parakeet (NeMo ASR) on GPU - REST endpoints                                  #
+#                                                                              #
+# Stack:                                                                       #
+#   - Namespace          : parakeet                                            #
+#   - Image              : parakeet-server:local                               #
+#                          (built from /home/clouduser/demo/parakeet/          #
+#                          Dockerfile and imported into k3s containerd)        #
+#   - Model              : nvidia/parakeet-tdt-0.6b-v2 (auto-downloaded from   #
+#                          HuggingFace on first request, cached in PVC)        #
+#   - GPU                : 1 x NVIDIA via legacy NVIDIA_VISIBLE_DEVICES path   #
+#                          (NOT `nvidia.com/gpu` resource - see big comment    #
+#                          in the env block below)                             #
+#   - Hostname           : parakeet-gpu.local                                  #
+#   - TLS                : Certificate `parakeet-gpu-local-cert` issued by     #
+#                          `foundry-local-operator-ca-issuer`                  #
+#                          (see parakeet_gpu_cert.yaml)                        #
+#   - Auth               : NONE at the Ingress (NeMo wrapper has no built-in   #
+#                          auth, and ingress-nginx 4.x refuses `auth-snippet`  #
+#                          under default risk rules). Reachable to anyone who  #
+#                          can resolve `parakeet-gpu.local` over TLS. Inside   #
+#                          this private cluster, acceptable; do NOT expose     #
+#                          publicly.                                           #
+#                                                                              #
+# REST endpoints exposed:                                                      #
+#   GET  /health                                                               #
+#   GET  /v1/models                                                            #
+#   POST /v1/audio/transcriptions   (multipart `file=...`, OpenAI-compatible)  #
+#                                                                              #
+# One-time prerequisites:                                                      #
+#                                                                              #
+#   1) Build and import the image (only step that doesn't use kubectl):        #
+#         cd /home/clouduser/demo/parakeet                                     #
+#         docker build -t parakeet-server:local .                              #
+#         docker save parakeet-server:local \                                  #
+#             | sudo /usr/local/bin/k3s ctr -n k8s.io images import -          #
+#                                                                              #
+#   2) Repair the foundry CA issuer (only if you haven't already):             #
+#         kubectl apply -f bootstrap_foundry_ca.yaml                           #
+#                                                                              #
+#   3) Add a hosts entry on the client machine:                                #
+#         echo "192.168.1.197 parakeet-gpu.local" | sudo tee -a /etc/hosts     #
+#                                                                              #
+# Apply:                                                                       #
+#   kubectl apply -f parakeet_gpu.yaml                                         #
+#   kubectl apply -f parakeet_gpu_cert.yaml                                    #
+#                                                                              #
+# Verify:                                                                      #
+#   kubectl -n parakeet get pods,svc,ingress                                   #
+#   kubectl -n parakeet logs -l app.kubernetes.io/name=parakeet-gpu -f         #
+#   kubectl -n parakeet get certificate parakeet-gpu-local-cert                #
+#                                                                              #
+# Smoke test:                                                                  #
+#   curl -k https://parakeet-gpu.local/health                                  #
+#   curl -k https://parakeet-gpu.local/v1/models                               #
+#   curl -k https://parakeet-gpu.local/v1/audio/transcriptions \               #
+#       -F "file=@some.wav"                                                    #
+# =========================================================================== #
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: parakeet
+  labels:
+    app.kubernetes.io/name: parakeet
+    foundry.azure.com/hardware: gpu
+---
+# Persistent cache for HuggingFace + NeMo so the model isn't re-downloaded on
+# every pod restart. Parakeet-tdt-0.6b-v2 is ~2.4 GB on disk after extraction.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: parakeet-model-cache
+  namespace: parakeet
+  labels:
+    app.kubernetes.io/name: parakeet-gpu
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parakeet-gpu
+  namespace: parakeet
+  labels:
+    app.kubernetes.io/name: parakeet-gpu
+    app.kubernetes.io/component: inference
+    foundry.azure.com/hardware: gpu
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # only one GPU on this node; avoid two pods racing for it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: parakeet-gpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: parakeet-gpu
+        app.kubernetes.io/component: inference
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: parakeet
+          image: parakeet-server:local
+          imagePullPolicy: Never        # image is loaded into k3s containerd via `k3s ctr images import`
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # ----------------------------------------------------------------
+            # Legacy GPU-injection path. We deliberately do NOT request the
+            # extended resource `nvidia.com/gpu`, because the GPU-operator's
+            # device plugin would annotate the pod with `cdi.k8s.io/...` and
+            # cause runc to expand a CDI hook that calls
+            # `nvidia-ctk hook disable-device-node-modification` - a sub-
+            # command that exists in nvidia-container-toolkit >=1.19 but NOT
+            # in the host's 1.17.8-2.azl3 package, producing
+            # `error running createContainer hook #4: exit status 3`.
+            #
+            # `runtimeClassName: nvidia` still routes the container through
+            # nvidia-container-runtime, which honours NVIDIA_VISIBLE_DEVICES
+            # to mount the GPU devices and driver libs the legacy way.
+            # ----------------------------------------------------------------
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            # Server config (server.py reads these).
+            - name: PARAKEET_MODEL
+              value: "nvidia/parakeet-tdt-0.6b-v2"
+            - name: PARAKEET_DEVICE
+              value: "cuda"
+            - name: PARAKEET_PORT
+              value: "8000"
+            # HF / NeMo cache locations (mounted to PVC below).
+            - name: HF_HOME
+              value: "/cache/huggingface"
+            - name: NEMO_CACHE_DIR
+              value: "/cache/nemo"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          # Generous startupProbe: cold start downloads model from HF (~2.4 GB)
+          # and loads it onto the GPU. After that, /health responds in <50ms.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60        # ~10 minutes max for first-run download
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: parakeet-model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parakeet-gpu
+  namespace: parakeet
+  labels:
+    app.kubernetes.io/name: parakeet-gpu
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: parakeet-gpu
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: parakeet-gpu
+  namespace: parakeet
+  labels:
+    app.kubernetes.io/name: parakeet-gpu
+  annotations:
+    # Audio uploads - generous body size and read timeouts.
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # NOTE: no auth-snippet here - ingress-nginx 4.x's annotation-risk-level
+    # blocks it. The Ingress is unauthenticated; rely on TLS + private network.
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - parakeet-gpu.local
+      secretName: parakeet-gpu-local-tls    # populated by parakeet_gpu_cert.yaml
+  rules:
+    - host: parakeet-gpu.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: parakeet-gpu
+                port:
+                  number: 80

@@ -1,0 +1,229 @@
+# =========================================================================== #
+# Whisper-base on GPU (faster-whisper-server)                                  #
+#                                                                              #
+# Stack:                                                                       #
+#   - Namespace          : whisper                                             #
+#   - Image              : fedirz/faster-whisper-server:latest-cuda            #
+#                          (canonical GPU tag for this image; there is no      #
+#                          `:latest-gpu` tag on Docker Hub)                    #
+#   - Model              : Systran/faster-whisper-base (auto-downloaded on    #
+#                          first request, cached in /root/.cache/huggingface)  #
+#   - GPU                : 1 x nvidia.com/gpu  (RuntimeClass: nvidia)          #
+#   - Hostname           : whisper-gpu.local                                   #
+#   - TLS                : Certificate `whisper-gpu-local-cert`                #
+#                          issued by ClusterIssuer                             #
+#                          `foundry-local-operator-ca-issuer`                  #
+#                          (see whisper_base_gpu_cert.yaml)                    #
+#   - Auth               : NONE at the ingress (faster-whisper-server has no
+#                          built-in auth, and ingress-nginx 4.x refuses the
+#                          `auth-snippet` annotation under default risk
+#                          rules). The service is reachable over TLS to
+#                          anyone who can resolve `whisper-gpu.local`. Inside
+#                          this private cluster that is acceptable; do NOT
+#                          expose this Ingress publicly. The `whisper-api-keys`
+#                          secret is still created (mirrors Qwen's secret
+#                          shape) so application code can stay symmetrical;
+#                          it just isn't enforced server-side here.
+#                                                                              #
+# One-time prerequisites:                                                      #
+#                                                                              #
+#   1) Repair the foundry CA issuer (REQUIRED if you have not done so):        #
+#         kubectl apply -f bootstrap_foundry_ca.yaml                           #
+#                                                                              #
+#   2) Create the namespace and (optional) API-key secret. The secret is no    #
+#      longer enforced by the Ingress, but is kept for parity with Qwen so     #
+#      application code can read a key the same way:                          #
+#         API_KEY=$(openssl rand -hex 32)                                      #
+#         kubectl create namespace whisper                                     #
+#         kubectl -n whisper create secret generic whisper-api-keys \          #
+#             --from-literal=primary-key="$API_KEY"                            #
+#                                                                              #
+#   3) Add a hosts entry on the client machine:                                #
+#         echo "192.168.1.197 whisper-gpu.local" | sudo tee -a /etc/hosts     #
+#                                                                              #
+# Apply:                                                                       #
+#   kubectl apply -f whisper_base_gpu.yaml                                     #
+#   kubectl apply -f whisper_base_gpu_cert.yaml                                #
+#                                                                              #
+# Verify:                                                                      #
+#   kubectl -n whisper get pods,svc,ingress                                    #
+#   kubectl -n whisper get certificate whisper-gpu-local-cert                  #
+#                                                                              #
+# Smoke test (no Authorization header needed at the Ingress):                  #
+#   curl -k https://whisper-gpu.local/v1/models                                #
+#   curl -k https://whisper-gpu.local/v1/audio/transcriptions \                #
+#       -F "file=@sample.wav" -F "model=Systran/faster-whisper-base"           #
+# =========================================================================== #
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: whisper
+  labels:
+    app.kubernetes.io/name: whisper
+    foundry.azure.com/hardware: gpu
+---
+# Persistent cache so models don't re-download on every pod restart.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: whisper-model-cache
+  namespace: whisper
+  labels:
+    app.kubernetes.io/name: whisper-gpu
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisper-gpu
+  namespace: whisper
+  labels:
+    app.kubernetes.io/name: whisper-gpu
+    app.kubernetes.io/component: inference
+    foundry.azure.com/hardware: gpu
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # avoid 2 pods fighting over the single GPU during rollouts
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: whisper-gpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: whisper-gpu
+        app.kubernetes.io/component: inference
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: whisper
+          image: fedirz/faster-whisper-server:latest-cuda
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # ----------------------------------------------------------------
+            # Legacy GPU-injection path. We deliberately do NOT request the
+            # extended resource `nvidia.com/gpu`, because the GPU-operator's
+            # device plugin would annotate the pod with `cdi.k8s.io/...` and
+            # cause runc to expand a CDI hook that calls
+            # `nvidia-ctk hook disable-device-node-modification` — a sub-
+            # command that exists in nvidia-container-toolkit ≥1.19 but NOT
+            # in the host's 1.17.8-2.azl3 package, producing
+            # `error running createContainer hook #4: exit status 3`.
+            #
+            # `runtimeClassName: nvidia` still routes the container through
+            # nvidia-container-runtime, which honours NVIDIA_VISIBLE_DEVICES
+            # to mount the GPU devices and driver libs the legacy way.
+            # ----------------------------------------------------------------
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            # Pydantic-Settings nested-key form: WHISPER__<field>
+            - name: WHISPER__MODEL
+              value: "Systran/faster-whisper-base"
+            - name: WHISPER__INFERENCE_DEVICE
+              value: "cuda"
+            - name: WHISPER__COMPUTE_TYPE
+              value: "float16"
+            - name: ENABLE_UI
+              value: "false"
+            # Cache directory for HuggingFace model downloads
+            - name: HF_HOME
+              value: "/root/.cache/huggingface"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30        # generous: first-run model download
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: whisper-model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisper-gpu
+  namespace: whisper
+  labels:
+    app.kubernetes.io/name: whisper-gpu
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: whisper-gpu
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whisper-gpu
+  namespace: whisper
+  labels:
+    app.kubernetes.io/name: whisper-gpu
+  annotations:
+    # Audio uploads — generous body size and read timeouts.
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # NOTE: faster-whisper-server has no built-in auth, and ingress-nginx's
+    # admission webhook (annotation-risk-level=High by default in 4.x) refuses
+    # `auth-snippet` even when allowSnippetAnnotations=true. Whisper is
+    # therefore reachable to anyone who can hit `whisper-gpu.local` over TLS
+    # — fine inside this private cluster network, NOT acceptable on the
+    # public internet. To re-enable bearer-token enforcement later, raise the
+    # controller risk floor:
+    #     helm upgrade ingress-nginx ingress-nginx/ingress-nginx \
+    #       -n ingress-nginx --reuse-values \
+    #       --set controller.config.annotations-risk-level=Critical
+    # then re-add the `auth-snippet` annotation.
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - whisper-gpu.local
+      secretName: whisper-gpu-local-tls    # populated by whisper_base_gpu_cert.yaml
+  rules:
+    - host: whisper-gpu.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whisper-gpu
+                port:
+                  number: 80

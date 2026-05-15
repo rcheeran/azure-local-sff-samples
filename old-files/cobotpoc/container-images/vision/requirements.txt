@@ -1,0 +1,20 @@
+# vision-service runtime dependencies.
+#
+# Pinned for reproducibility. Match the cobotpoc.py environment so the
+# detector behaviour is identical on both sides.
+
+# Web framework
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+python-multipart==0.0.20
+
+# Computer vision
+opencv-python-headless==4.10.0.84
+numpy<2.0
+mediapipe==0.10.14
+pillow==10.4.0
+
+# Open-vocabulary detection (OWL-ViT). transformers needs torch.
+transformers==4.46.0
+torch==2.4.1+cpu
+torchvision==0.19.1+cpu
