@@ -129,5 +129,7 @@ Once this command completes, you can see this cluster in the Azure Portal.
 
 ## Next steps
 
+
+- [Check GPU setup](check_gpu.md)
 - [Setup Nginx Ingress](connect.md)
 

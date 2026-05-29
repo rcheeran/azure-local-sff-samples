@@ -251,3 +251,8 @@ kubectl logs gpu-test
 ```
 
 If all pass, NVIDIA GPU is accessible from your k3s Kubernetes cluster.
+
+## Next steps
+
+- [Setup Nginx Ingress](install_nginx.md)
+

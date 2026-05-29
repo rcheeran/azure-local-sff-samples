@@ -610,3 +610,8 @@ Expected: `{"status":"ok"}` from `/healthz`, a JSON object listing `cube/bowl/ha
 
 If `/readyz` returns 503 for a few minutes after the first start, the pod is still downloading OWL-ViT into the PVC — watch the logs.
 
+## Next steps
+
+- [Run mycobot robot](run_cobotpoc.md)
+
+

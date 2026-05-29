@@ -164,3 +164,7 @@ kubectl get cm foundry-local-catalog -n foundry-local-operator -o json \
 ```
 
 Use any value from the **ALIAS** column as `spec.model.catalog.name` (or `spec.source.catalog.alias` on a `Model`) when creating a `ModelDeployment`.
+
+## Next steps
+
+- [Deploy models](deploy_models.md)

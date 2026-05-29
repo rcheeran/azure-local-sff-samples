@@ -84,3 +84,7 @@ kubectl annotate ingressclass nginx \
 > ```
 
 ---
+
+## Next steps
+
+- [Install Foundry Local](install_foundry_local.md)
