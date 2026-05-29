@@ -54,42 +54,6 @@ kubectl scale deployment traefik -n kube-system --replicas=0
 
 ---
 
-## Configure kubeconfig for `clouduser`
-
-The k3s kubeconfig at `/etc/rancher/k3s/k3s.yaml` is owned by `root` with mode `0600`, so `clouduser` cannot read it directly. Create a personal copy at the default location `kubectl` (and `helm`) load automatically.
-
-```bash
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown "$(id -u):$(id -g)" ~/.kube/config
-chmod 600 ~/.kube/config
-
-kubectl get nodes
-```
-
-After this, the kubeconfig lives at:
-
-```
-/home/clouduser/.kube/config
-```
-
-No `KUBECONFIG` export is required — `kubectl` and `helm` discover `~/.kube/config` by default.
-
-### Verify
-
-```bash
-kubectl config current-context     # should print "default"
-kubectl get nodes
-helm list -A
-```
-
-> If `helm` or `kubectl` still reports `permission denied` on `/etc/rancher/k3s/k3s.yaml`, an old `KUBECONFIG` export is overriding `~/.kube/config`. Clear it and do **not** use `sudo` with helm/kubectl:
->
-> ```bash
-> unset KUBECONFIG
-> ```
-
----
 
 ## Install cert-manager
 
@@ -155,11 +119,7 @@ The `trust-manager` pod should be `Running` / `Ready` and the `bundles.trust.cer
 The inference operator chart is published to Microsoft Container Registry (MCR) as an OCI artifact, so it is installed directly with `helm upgrade --install` (no `helm repo add` needed).
 
 ```bash
-helm upgrade --install inference-operator \
-  oci://mcr.microsoft.com/foundrylocalonazurelocal/helmcharts/helm/inference-operator \
-  --version 0.0.1-prp.3 \
-  -n foundry-local-operator \
-  --create-namespace
+helm upgrade --install inference-operator oci://mcr.microsoft.com/microsoft.foundry/foundrylocalenabledbyarc/helmcharts/helm/inference-operator --version 0.260430.8 -n foundry-local-operator --create-namespace --set entraAuth.enabled=false 
 ```
 
 ### Verify the operator
@@ -181,80 +141,6 @@ models.foundrylocal.azure.com              <date>
 ```
 
 The operator pod should reach `Running` / `Ready`, and the three Foundry Local CRDs (`models`, `modeldeployments`, `inferenceservices`) should be registered.
-
----
-
-## Install the community ingress-nginx controller
-
-The Foundry Local operator generates `Ingress` resources with `nginx.ingress.kubernetes.io/*` annotations, which only work with the **community** `ingress-nginx` controller (not the commercial NGINX Inc one). On k3s, this controller needs `externalIPs` because k3s lacks a real LoadBalancer provider.
-
-```bash
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo update
-
-NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-echo "Using node IP: $NODE_IP"
-
-helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx \
-  --create-namespace \
-  --set controller.service.externalIPs[0]="$NODE_IP" \
-  --set controller.ingressClassResource.default=true
-```
-
-> The `NODE_IP` lookup grabs the InternalIP of the first node. On multi-node clusters, target a specific node with `kubectl get node <name> -o jsonpath=...`.
-
-### Verify ingress-nginx
-
-```bash
-kubectl get pods -n ingress-nginx
-kubectl get svc -n ingress-nginx
-kubectl get ingressclass
-```
-
-Expected output:
-
-```text
-NAME                                       READY   STATUS    RESTARTS   AGE
-ingress-nginx-controller-xxxxxxxxx-xxxxx   1/1     Running   0          30s
-
-NAME                       TYPE           CLUSTER-IP    EXTERNAL-IP     PORT(S)
-ingress-nginx-controller   LoadBalancer   10.43.x.x     <NODE_IP>       80:xxxxx/TCP,443:xxxxx/TCP
-
-NAME    CONTROLLER             PARAMETERS   AGE
-nginx   k8s.io/ingress-nginx   <none>       30s
-```
-
-#### Confirm `nginx` is the default IngressClass
-
-The Foundry Local operator picks up the cluster's default IngressClass when generating model Ingress resources. Verify:
-
-```bash
-kubectl get ingressclass nginx \
-  -o jsonpath='{.metadata.annotations.ingressclass\.kubernetes\.io/is-default-class}{"\n"}'
-```
-
-Expected output:
-
-```text
-true
-```
-
-If it prints empty or `false`, mark it as default:
-
-```bash
-kubectl annotate ingressclass nginx \
-  ingressclass.kubernetes.io/is-default-class=true --overwrite
-```
-
-> Only one IngressClass should be the default at a time. If another class (e.g. `traefik`) is also marked default, remove its annotation:
->
-> ```bash
-> kubectl annotate ingressclass traefik \
->   ingressclass.kubernetes.io/is-default-class- 
-> ```
-
-For the full per-model ingress / TLS / CA bundle wiring, continue with [Docs/Nginx_setup.md](Docs/Nginx_setup.md) starting at Step 3.
 
 ---
 

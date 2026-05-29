@@ -22,11 +22,7 @@ You need:
 - Save the SSH private key thats downloaded during the deployment in a known location on your work computer.
 
 
-## Connect to your machine
+## Next steps
 
-Azure Local on Linux is a headless OS. You will need to access the machine via SSH either using the terminal or using VS Code. 
+- [Connect to your machine](connect.md)
 
-### Connect using SSH via terminal
-
-
-### Connect using VS code remote session

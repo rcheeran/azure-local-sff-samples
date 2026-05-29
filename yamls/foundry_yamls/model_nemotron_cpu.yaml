@@ -1,0 +1,39 @@
+apiVersion: foundrylocal.azure.com/v1
+kind: ModelDeployment
+metadata:
+  name: nemotron
+  namespace: foundry-local-operator
+spec:
+  displayName: nemotron
+  runtime: onnx-genai
+  compute: cpu
+  model:
+    catalog:
+      name: nemotron-speech-streaming-en-0.6b
+  resources:
+    # Sized from observed steady-state RSS (~700 MiB) with ~3x headroom.
+    # The original 16Gi/32Gi reservation alone consumed >50% of the node's
+    # scheduler budget and starved every other workload (see vision-service
+    # FailedScheduling: "Insufficient memory").
+    requests:
+        cpu: "2"
+        memory: 2Gi
+    limits:
+        cpu: "4"
+        memory: 4Gi
+  replicas: 1
+  endpoint:
+    enabled: true
+    host: nemotron-cpu.local
+    ingressClassName: nginx
+    # The operator hard-codes nginx.ingress.kubernetes.io/rewrite-target on
+    # the generated Ingress. We must therefore use a regex path with a
+    # capture group AND tell the operator the matching rewrite target,
+    # otherwise nginx silently rewrites every URL to / and the upstream
+    # OpenAI server returns 404 on /v1/models, /v1/chat/completions, etc.
+    # See `kubectl explain modeldeployment.spec.endpoint`.
+    path: /(.*)
+    pathType: ImplementationSpecific
+    rewritePath: /$1
+    annotations:
+      nginx.ingress.kubernetes.io/use-regex: "true"

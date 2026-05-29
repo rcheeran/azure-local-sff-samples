@@ -1,0 +1,237 @@
+# =========================================================================== #
+# vision-service                                                               #
+#                                                                              #
+# Stateless HTTP service that runs the four detectors extracted from          #
+# cobotpoc.py (cube / bowl / hand / misc). GPU-enabled via the                 #
+# nvidia-device-plugin (time-sliced, see check_gpu.md): OWL-ViT inference      #
+# drops from ~30 s on CPU to <1 s on the shared RTX 2000E Ada.                 #
+#                                                                              #
+# Deploy:                                                                      #
+#   # 1. Build the image (on this host):                                       #
+#   cd /home/clouduser/container_images/vision                                 #
+#   sudo docker build --network=host -t vision-service:local .                 #
+#   sudo docker save vision-service:local \                                    #
+#       | sudo /usr/local/bin/k3s ctr -n k8s.io images import -                #
+#                                                                              #
+#   # 2. Apply the manifests:                                                  #
+#   kubectl apply -f yamls/vision_yamls/vision_deployment.yaml                 #
+#                                                                              #
+#   # 3. Add the host to /etc/hosts:                                           #
+#   echo '192.168.1.196 vision.local' | sudo tee -a /etc/hosts                 #
+#                                                                              #
+#   # 4. Smoke test:                                                           #
+#   curl -k https://vision.local/healthz                                       #
+#   curl -k https://vision.local/v1/models                                     #
+# =========================================================================== #
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vision
+  labels:
+    app.kubernetes.io/name: vision
+    foundry.azure.com/hardware: gpu
+---
+# Persistent cache for HuggingFace so OWL-ViT (~580 MB) isn't re-downloaded
+# every time the pod restarts. Same pattern as parakeet-model-cache.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vision-model-cache
+  namespace: vision
+  labels:
+    app.kubernetes.io/name: vision-service
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vision-service
+  namespace: vision
+  labels:
+    app.kubernetes.io/name: vision-service
+    app.kubernetes.io/component: inference
+    foundry.azure.com/hardware: gpu
+spec:
+  # Strictly 1 replica + Recreate strategy: vision-service now owns
+  # /dev/video0 (V4L2 single-streamer). A rolling update would have the
+  # new pod try to open the device while the old pod still holds it.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vision-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vision-service
+        app.kubernetes.io/component: inference
+    spec:
+      # Pin to whichever node owns the webcam. `kubernetes.io/hostname` is a
+      # well-known label that every node carries automatically, so no custom
+      # labeling is required -- just set this to the target node's hostname
+      # (`kubectl get nodes -o name`).
+      nodeSelector:
+        kubernetes.io/hostname: bf63cb59-a54b-4815-bc06-9e999337a0bb
+      # Modern device-plugin GPU path: runtimeClassName routes through
+      # nvidia-container-runtime, and the `nvidia.com/gpu: 1` request in
+      # resources.limits below pulls one time-sliced slot from the device
+      # plugin (4 advertised total). NVIDIA_VISIBLE_DEVICES is injected
+      # automatically by the plugin -- do NOT set it manually.
+      runtimeClassName: nvidia
+      containers:
+        - name: vision
+          image: vision-service:local
+          imagePullPolicy: Never        # loaded into k3s containerd via `k3s ctr images import`
+          # privileged is required for /dev/video0. Kubernetes hostPath
+          # only bind-mounts the device node; the kernel's device-cgroup
+          # whitelist still denies I/O ("Operation not permitted") unless
+          # the container is privileged. Same constraint as robot-driver
+          # for /dev/ttyACM*.
+          securityContext:
+            privileged: true
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - { name: VISION_PORT,                  value: "8000" }
+            - { name: VISION_HAND_MODEL,            value: "/app/models/hand_landmarker.task" }
+            - { name: VISION_OWLVIT_MODEL_ID,       value: "google/owlvit-base-patch32" }
+            - { name: VISION_DEVICE,                value: "cuda" }
+            - { name: HF_HOME,                      value: "/cache/huggingface" }
+            - { name: TRANSFORMERS_CACHE,           value: "/cache/huggingface" }
+            # Camera (was the standalone camera-capture container; merged 2026-05-05)
+            - { name: VISION_CAMERA_DEVICE,         value: "" }       # autoprobe; set to /dev/video0 to force
+            - { name: VISION_CAMERA_WIDTH,          value: "0" }
+            - { name: VISION_CAMERA_HEIGHT,         value: "0" }
+            - { name: VISION_CAMERA_FPS,            value: "30" }
+            - { name: VISION_CAMERA_JPEG_QUALITY,   value: "75" }
+            - { name: VISION_CAMERA_STREAM_FPS,     value: "30" }
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+              nvidia.com/gpu: 1     # one time-sliced slot (4 advertised total on this node)
+          # Generous startupProbe: cold start downloads OWL-ViT from HF.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60        # ~10 minutes for first download
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache
+            - name: dev-video0
+              mountPath: /dev/video0
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: vision-model-cache
+        - name: dev-video0
+          hostPath:
+            path: /dev/video0
+            type: CharDevice
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vision-service
+  namespace: vision
+  labels:
+    app.kubernetes.io/name: vision-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vision-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+# TLS certificate for vision.local. Reuses the foundry-local-operator's
+# ClusterIssuer so the same CA bundle that already trusts qwen-cpu.local
+# also trusts vision.local (no extra CA install on the dev host).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vision-local-cert
+  namespace: vision
+spec:
+  secretName: vision-local-tls
+  duration: 2160h      # 90 days
+  renewBefore: 360h    # 15 days
+  commonName: vision.local
+  dnsNames:
+    - vision.local
+    - vision
+    - vision.vision
+    - vision.vision.svc
+    - vision.vision.svc.cluster.local
+  issuerRef:
+    name: foundry-local-operator-ca-issuer
+    kind: ClusterIssuer
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vision-service
+  namespace: vision
+  labels:
+    app.kubernetes.io/name: vision-service
+  annotations:
+    # /v1/detect responses can carry a base64-encoded JPEG (typically
+    # 20-50 KB, but room for full-frame previews up to ~512 KB). Bump
+    # body size so detect requests are not truncated.
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    # /stream is a long-lived multipart/x-mixed-replace MJPEG response.
+    # nginx MUST NOT buffer it -- otherwise every frame waits for a flush
+    # that never comes and the live stream never appears.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Long timeouts so /stream connections aren't dropped by the ingress
+    # while a viewer is watching. 24 h is generous; tune to your UX.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - vision.local
+      secretName: vision-local-tls
+  rules:
+    - host: vision.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vision-service
+                port:
+                  number: 80

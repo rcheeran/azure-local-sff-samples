@@ -1,0 +1,53 @@
+apiVersion: foundrylocal.azure.com/v1
+kind: ModelDeployment
+metadata:
+  name:  qwen3-1-7b-cuda-gpu
+  namespace: foundry-local-operator
+  labels:
+    app.kubernetes.io/name:  qwen3-1-7b-cuda-gpu
+    app.kubernetes.io/component: inference
+    foundry.azure.com/hardware: gpu
+spec:
+  displayName: "Qwen3 1.7B GPU"
+  model:
+    # Qwen3-1.7B Instruct, ONNX RTN-quantised for CUDA. ~ 1.28 GB on disk.
+    # Requires an NVIDIA GPU on the node and the device plugin to advertise
+    # nvidia.com/gpu (this cluster: NVIDIA RTX 2000E Ada, 16 GB).
+    catalog:
+      name: qwen3-1.7b-cuda-gpu
+      version: "2"
+  workloadType: generative
+  compute: gpu
+  replicas: 1
+  resources:
+    requests:
+      cpu: "1"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+      # Maps to nvidia.com/gpu=1 on the synthesized Pod. The 0.260430.8
+      # generative-sdk-gpu image may have the CDI hook fix; if the pod
+      # CrashLoopBackOffs with "No help topic for
+      # 'disable-device-node-modification'", flip back to the legacy path:
+      #   - remove this `gpu: 1` line
+      #   - set `skipGpuResource: true`
+      #   - add `nodeSelector: { nvidia.com/gpu.present: "true" }`
+      #   - add `env: [NVIDIA_VISIBLE_DEVICES=all, NVIDIA_DRIVER_CAPABILITIES=compute,utility]`
+      gpu: 1
+  # This section is relevant in case you use an Ingress Controller
+  endpoint:
+    enabled: true
+    host: qwen-gpu.local
+    ingressClassName: nginx
+    # The operator hard-codes nginx.ingress.kubernetes.io/rewrite-target on
+    # the generated Ingress. We must therefore use a regex path with a
+    # capture group AND tell the operator the matching rewrite target,
+    # otherwise nginx silently rewrites every URL to / and the upstream
+    # OpenAI server returns 404 on /v1/models, /v1/chat/completions, etc.
+    # See `kubectl explain modeldeployment.spec.endpoint`.
+    path: /(.*)
+    pathType: ImplementationSpecific
+    rewritePath: /$1
+    annotations:
+      nginx.ingress.kubernetes.io/use-regex: "true"
